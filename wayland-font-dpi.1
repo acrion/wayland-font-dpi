@@ -1,0 +1,134 @@
+.TH WAYLAND-FONT-DPI 1 "July 2025" "wayland-font-dpi 1.1.0" "User Commands"
+.SH NAME
+wayland-font-dpi \- Automatic text scaling for Wayland compositors based on physical display DPI
+.SH SYNOPSIS
+.B wayland-font-dpi
+is run automatically via systemd services
+.br
+.B wayland-font-dpi-session
+.SH DESCRIPTION
+.B wayland-font-dpi
+automatically adjusts font and UI element scaling based on your display's physical DPI,
+avoiding the blurriness caused by Wayland's fractional display scaling.
+.PP
+The tool consists of two components that work together:
+.TP
+.B wayland-font-dpi
+Root service that monitors display information and updates /etc/environment
+.TP
+.B wayland-font-dpi-session
+User service that applies GTK text scaling via gsettings
+.PP
+This tool depends on
+.B wayland-display-info
+to provide current display configuration.
+.SH OPERATION
+The tool operates automatically through systemd services:
+.PP
+1. The wayland-display-info service detects display configuration
+.br
+2. Display information is cached in \fI/var/cache/wayland-display-info/display-info\fR
+.br
+3. The root service updates \fI/etc/environment\fR with appropriate scaling variables
+.br
+4. GTK settings are applied immediately via gsettings
+.br
+5. Other applications use the new scaling after next login (PAM loads /etc/environment)
+.SH FILES
+.TP
+.I /var/cache/wayland-display-info/display-info
+Cache file containing detected display information (maintained by wayland-display-info)
+.TP
+.I /etc/environment
+System environment file updated with scaling variables
+.TP
+.I /usr/lib/systemd/system/wayland-font-dpi.service
+Root systemd service
+.TP
+.I /usr/lib/systemd/user/wayland-font-dpi-session.service
+User session service
+.TP
+.I /usr/lib/wayland-font-dpi/wayland-font-dpi
+Main executable
+.TP
+.I /usr/lib/wayland-font-dpi/wayland-font-dpi-session
+Session executable
+.SH ENVIRONMENT
+The following environment variables are set in /etc/environment:
+.TP
+.B GDK_SCALE=1
+Prevents GTK integer scaling conflicts
+.TP
+.B GDK_DPI_SCALE=1
+Neutralizes legacy GTK DPI settings
+.TP
+.B QT_SCALE_FACTOR=\fIscale\fR
+Unified scaling for Qt 5/6 applications
+.TP
+.B _JAVA_OPTIONS=-Dsun.java2d.uiScale=\fIscale\fR
+Scaling for Java AWT/Swing applications
+.PP
+The following variables are explicitly removed to prevent conflicts:
+.br
+QT_FONT_DPI, QT_ENABLE_HIGHDPI_SCALING, QT_AUTO_SCREEN_SCALE_FACTOR,
+.br
+ELECTRON_OZONE_PLATFORM_HINT, MOZ_ENABLE_WAYLAND, MOZ_DISABLE_WAYLAND
+.SH GSETTINGS
+The following GTK setting is applied immediately without logout:
+.TP
+.B org.gnome.desktop.interface text-scaling-factor
+Scales both text and graphical UI elements in GTK applications
+.SH EXAMPLES
+Check service status:
+.PP
+.nf
+systemctl status wayland-font-dpi.service
+systemctl --user status wayland-display-info.service
+systemctl --user status wayland-font-dpi-session.service
+.fi
+.PP
+View logs:
+.PP
+.nf
+journalctl -t wayland-font-dpi
+.fi
+.PP
+Check current display information:
+.PP
+.nf
+cat /var/cache/wayland-display-info/display-info
+.fi
+.PP
+Check applied settings:
+.PP
+.nf
+grep WAYLAND-FONT-DPI -A20 /etc/environment
+.fi
+.SH LIMITATIONS
+.IP \(bu 2
+Requires logout/login after installation for environment variables to take effect
+.IP \(bu 2
+Display hotplug requires logout/login for non-GTK applications
+.IP \(bu 2
+Wayland display scaling must remain at 1.0
+.IP \(bu 2
+Some applications may ignore these settings
+.SH COMPATIBILITY
+Works with any wlroots-based compositor that supports the wlr-output-management protocol,
+including Wayfire, Sway, Hyprland, and others.
+.SH SEE ALSO
+.BR systemctl (1),
+.BR gsettings (1),
+.BR journalctl (1),
+.BR wayland-display-info (1)
+.SH AUTHORS
+Stefan Zipproth <s.zipproth@acrion.ch>
+.br
+acrion innovations GmbH
+.SH COPYRIGHT
+Copyright \(co 2025 acrion innovations GmbH
+.br
+License: AGPL-3.0
+.br
+This is free software: you are free to change and redistribute it.
+There is NO WARRANTY, to the extent permitted by law.

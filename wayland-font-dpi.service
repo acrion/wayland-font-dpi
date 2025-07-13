@@ -1,0 +1,14 @@
+[Unit]
+Description=Wayland Font DPI - Physical text scaling without fractional display scaling
+After=multi-user.target
+Before=display-manager.service
+
+[Service]
+Type=simple
+ExecStart=/usr/lib/wayland-font-dpi/wayland-font-dpi
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=wayland-font-dpi
+
+[Install]
+WantedBy=multi-user.target

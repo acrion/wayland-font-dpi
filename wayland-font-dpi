@@ -1,0 +1,211 @@
+#!/usr/bin/env bash
+# Copyright (c) 2025 acrion innovations GmbH
+# Authors: Stefan Zipproth, s.zipproth@acrion.ch
+#
+# This file is part of wayland-font-dpi, see https://github.com/acrion/wayland-font-dpi
+#
+# wayland-font-dpi is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# wayland-font-dpi is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU Affero General Public License for more details.
+#
+# You should have received a copy of the GNU Affero General Public License
+# along with wayland-font-dpi. If not, see <https://www.gnu.org/licenses/>.
+
+# Wayland Font DPI - Automatic text scaling based on physical display DPI
+# Avoids Wayland's fractional scaling to prevent font blurriness
+
+# This script is executed by wayland-font-dpi.service in root context.
+# It reads information from the file /var/cache/wayland-font-dpi/display-info
+# that was written by a previous user session (see /usr/bin/wayland-font-dpi-detect).
+# Based on this file, it edits /etc/environment which sets environment variables
+# for any subsequent user session.
+
+set -eu
+
+CACHE_DIR="/var/cache/wayland-display-info"
+CACHE_FILE="$CACHE_DIR/display-info"
+CONFIG_FILE="/etc/environment"
+REFERENCE_DPI=96   # baseline for the scale factor
+
+trim_trailing_blank_lines() {
+    local file="$1"
+    sed -i -e ':a' \
+           -e '/^[[:space:]]*$/{$d;N;ba' \
+           -e '}' \
+        "$file"
+}
+
+ensure_proper_spacing() {
+    local file="$1"
+
+    [[ ! -s "$file" ]] && return
+
+    local last_char last_two_chars
+    last_char=$(tail -c1 "$file" 2>/dev/null || true)
+    last_two_chars=$(tail -c2 "$file" 2>/dev/null || true)
+
+    if [[ -z "$last_char" || "$last_char" != $'\n' ]]; then
+        printf '\n\n' >>"$file"
+    elif [[ "$last_two_chars" != $'\n\n' ]]; then
+        printf '\n'   >>"$file"
+    fi
+}
+
+##############################################################################
+# wayland-font-dpi: Generate or update system‑wide HiDPI environment settings
+#
+# This helper is designed for Wayland compositors such as Wayfire. It reads
+# the display information produced by wayland-font-dpi-session and writes a
+# short,self‑contained stanza to /etc/environment.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+#  Rationale for each environment variable that we add or deliberately omit
+# ─────────────────────────────────────────────────────────────────────────────
+#   GDK_SCALE=1
+#       GTK integer scaling OFF → prevents duplicate scaling when
+#       org.gnome.desktop.interface text‑scaling‑factor is already in use.
+#   GDK_DPI_SCALE=1
+#       Legacy fractional DPI knob for GTK; neutralised to avoid GTK × Xft.dpi
+#       interactions under XWayland.
+#   QT_SCALE_FACTOR=<scale>
+#       Single source of truth for Qt 5/6. We do *not* enable
+#       QT_ENABLE_HIGHDPI_SCALING or QT_AUTO_SCREEN_SCALE_FACTOR so that the
+#       final factor equals this value.
+#   QT_FONT_DPI (removed)
+#       Historical font‑only DPI. Keeping it would multiply with
+#       QT_SCALE_FACTOR and bloat text beyond widgets → removed.
+#   QT_ENABLE_HIGHDPI_SCALING (removed)
+#       Modern replacement for QT_AUTO_SCREEN_SCALE_FACTOR; activating it would
+#       double the calculation in combination with QT_SCALE_FACTOR → removed.
+#   QT_AUTO_SCREEN_SCALE_FACTOR (removed)
+#       Legacy auto‑scaling flag (Qt ≤ 5.13). Any non‑empty value enables an
+#       additional scale that multiplies with QT_SCALE_FACTOR → removed.
+#   ELECTRON_OZONE_PLATFORM_HINT (removed)
+#       Enables the Wayland backend in Electron ≥ 28. Unfortunately this still
+#       causes severe flicker with some wlroots compositors (Wayfire, Hyprland)
+#       — see Arch Forum thread 294804 and related NVIDIA explicit‑sync issues.
+#       We therefore *omit* the variable by default and keep it in the cleanup
+#       list so that user‑defined values are purged. Users can still add
+#       it per‑APP via a .desktop file.
+#   _JAVA_OPTIONS=-Dsun.java2d.uiScale=<scale>
+#       Toolkit‑agnostic switch for AWT/Swing/SWT. Must be unquoted because
+#       /etc/environment is parsed verbatim by pam_env.
+#   MOZ_ENABLE_WAYLAND / MOZ_DISABLE_WAYLAND (both removed)
+#       From Firefox 121 onwards Wayland is the built‑in default. We delete
+#       any previously forced setting and let the browser decide. Users who
+#       really want XWayland can still export MOZ_DISABLE_WAYLAND=1 manually.
+#
+#   Lines beginning with '# WAYLAND-FONT-DPI #' delimit the generated block
+#   and are replaced atomically on every invocation.
+##############################################################################
+
+process_display_info() {
+    if [[ ! -s $CACHE_FILE ]]; then
+        echo "<6>Waiting for display-info to appear …"
+        return
+    fi
+
+    local best_line dpi width height scale
+
+    # Pick the line with the largest pixel area (width × height) – usually the
+    # internal panel on single‑screen laptops or the primary monitor on PCs.
+    if [[ -r $CACHE_FILE ]]; then
+        best_line=$(awk '{px=$3*$4; if(px>max){max=px; l=$0}} END{print l}' "$CACHE_FILE")
+    fi
+
+    [[ -z ${best_line:-} ]] && return 1
+
+    # shellcheck disable=SC2034  # width/height are kept for optional logging
+    read -r _ dpi width height <<< "$best_line"
+
+    # Validate: dpi must be a positive number (integer or decimal).
+    [[ $dpi =~ ^[0-9]+(\.[0-9]+)?$ ]] || return 1
+
+    # Calculate fractional scale (e.g. 140 dpi / 96 dpi ≃ 1.458)
+    # Use bc for floating‑point arithmetic; keep three decimals.
+    scale=$(bc -l <<< "scale=3; $dpi / $REFERENCE_DPI")
+
+    # Purge any previous block as well as conflicting legacy variables.
+    sed -i \
+        -e '/^# WAYLAND-FONT-DPI # /d' \
+        -e '/^GDK_SCALE=/d' \
+        -e '/^GDK_DPI_SCALE=/d' \
+        -e '/^QT_SCALE_FACTOR=/d' \
+        -e '/^QT_FONT_DPI=/d' \
+        -e '/^QT_ENABLE_HIGHDPI_SCALING=/d' \
+        -e '/^QT_AUTO_SCREEN_SCALE_FACTOR=/d' \
+        -e '/^ELECTRON_OZONE_PLATFORM_HINT=/d' \
+        -e '/^_JAVA_OPTIONS=/d' \
+        -e '/^MOZ_ENABLE_WAYLAND=/d' \
+        -e '/^MOZ_DISABLE_WAYLAND=/d' \
+        "$CONFIG_FILE"
+
+    trim_trailing_blank_lines   "$CONFIG_FILE"
+    ensure_proper_spacing       "$CONFIG_FILE"
+
+    {
+        printf '# WAYLAND-FONT-DPI # --- automatically generated by wayland-font-dpi ---\n'
+        printf '# WAYLAND-FONT-DPI # selected display: %sx%s @ %.1f dpi\n' "$width" "$height" "$dpi"
+        echo   'GDK_SCALE=1'
+        echo   'GDK_DPI_SCALE=1'
+        printf 'QT_SCALE_FACTOR=%s\n' "$scale"
+        printf '_JAVA_OPTIONS=-Dsun.java2d.uiScale=%s\n' "$scale"
+        printf '# WAYLAND-FONT-DPI # --- end of automatically generated section ---\n'
+    } >>"$CONFIG_FILE"
+
+    echo "<5>Environment file ${CONFIG_FILE} updated"
+
+    # Propagate variables into the first graphical user session (if present)
+    local session_user
+    session_user=$(loginctl list-sessions --no-legend | awk 'NR==1 {print $3}')
+    if [[ -n "${session_user}" ]]; then
+        local uid; uid=$(id -u "${session_user}")
+
+        sudo -u "${session_user}" \
+            XDG_RUNTIME_DIR="/run/user/${uid}" \
+            QT_SCALE_FACTOR="${scale}" \
+            QT_FONT_DPI="$(printf "%.0f" "${dpi}")" \
+            ELECTRON_SCALE_FACTOR="${scale}" \
+            GDK_SCALE=1 \
+            GDK_DPI_SCALE="${scale}" \
+            MOZ_ENABLE_WAYLAND=1 \
+            bash -c '
+                systemctl --user set-environment \
+                    QT_SCALE_FACTOR="$QT_SCALE_FACTOR" \
+                    QT_FONT_DPI="$QT_FONT_DPI" \
+                    ELECTRON_SCALE_FACTOR="$ELECTRON_SCALE_FACTOR" \
+                    GDK_SCALE="$GDK_SCALE" \
+                    GDK_DPI_SCALE="$GDK_DPI_SCALE" \
+                    MOZ_ENABLE_WAYLAND="$MOZ_ENABLE_WAYLAND"
+                    
+                dbus-update-activation-environment --systemd \
+                    QT_SCALE_FACTOR QT_FONT_DPI ELECTRON_SCALE_FACTOR \
+                    GDK_SCALE GDK_DPI_SCALE MOZ_ENABLE_WAYLAND
+            '
+    fi
+
+    echo "<6>DPI configuration applied successfully"
+}
+
+##############################################################################
+# 1) Try once immediately (covers the case where display-info already exists)
+##############################################################################
+process_display_info
+
+##############################################################################
+# 2) Then watch for creation / replacement of display-info
+##############################################################################
+while read -r _ _ file; do
+    [[ "$file" == "display-info" ]] || continue
+    sleep 0.1
+    echo "<6>display-info changed – reprocessing..."
+    process_display_info
+done < <(
+    inotifywait -q -m -e close_write,create,move --format '%w %e %f' "$CACHE_DIR"
+)

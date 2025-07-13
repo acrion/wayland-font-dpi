@@ -1,0 +1,20 @@
+[Unit]
+Description=Wayland Font DPI — per‑user GTK scaling daemon
+After=wayland-dpi.service graphical-session.target
+Wants=wayland-dpi.service graphical-session.target
+ConditionUser=!lightdm
+ConditionUser=!gdm
+ConditionUser=!sddm
+
+[Service]
+Type=simple
+ExecStart=/usr/lib/wayland-font-dpi/wayland-font-dpi-session
+Restart=on-failure
+RestartSec=3s
+StartLimitBurst=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=wayland-font-dpi
+
+[Install]
+WantedBy=default.target

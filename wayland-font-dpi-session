@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# Copyright (c) 2025 acrion innovations GmbH
+# Authors: Stefan Zipproth, s.zipproth@acrion.ch
+#
+# This file is part of wayland-font-dpi, see https://github.com/acrion/wayland-font-dpi
+#
+# wayland-font-dpi is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# wayland-font-dpi is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU Affero General Public License for more details.
+#
+# You should have received a copy of the GNU Affero General Public License
+# along with wayland-font-dpi. If not, see <https://www.gnu.org/licenses/>.
+
+# Session helper for Wayland Font DPI
+# This script is executed by wayland-font-dpi-session.service (in user context).
+# It reads the file /var/cache/wayland-display-info/display-info which is
+# maintained by the wayland-display-info service.
+# It applies the per-user GTK scaling.
+
+set -eu
+
+# Don't run for display manager users
+[[ $USER =~ ^(lightdm|gdm|sddm)$ ]] && exit 0
+
+CACHE_DIR="/var/cache/wayland-display-info"
+CACHE_FILE="$CACHE_DIR/display-info"
+REFERENCE_DPI=96
+
+apply_scale() {
+    local best_line dpi width height scale
+
+    # Choose line with highest pixel count (width×height)
+    if [[ -r $CACHE_FILE ]]; then
+        best_line=$(awk '{px=$3*$4; if(px>max){max=px; l=$0}} END{print l}' "$CACHE_FILE")
+    fi
+
+    [[ -z ${best_line:-} ]] && return 1
+
+    read -r _ dpi width height <<< "$best_line"
+    [[ $dpi =~ ^[0-9]+(\.[0-9]+)?$ ]] || return 1
+
+    scale=$(bc -l <<< "scale=3; $dpi / $REFERENCE_DPI")
+    gsettings set org.gnome.desktop.interface text-scaling-factor "$scale" 2>/dev/null || true
+    echo "<5>Applied GTK text-scaling factor $scale (line: $best_line)"
+}
+
+# Wait until wayland-display-info produced the cache file
+until [[ -r $CACHE_FILE ]]; do sleep 1; done
+apply_scale
+
+# Monitor file for changes
+while read -r _ _ file; do
+    [[ "$file" == "display-info" ]] || continue
+    sleep 0.1
+    echo "<6>display-info changed – reprocessing (session)..."
+    apply_scale
+done < <(
+    inotifywait -q -m -e close_write,create,move --format '%w %e %f' "$CACHE_DIR"
+)
