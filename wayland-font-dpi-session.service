@@ -17,4 +17,4 @@ StandardError=journal
 SyslogIdentifier=wayland-font-dpi
 
 [Install]
-WantedBy=default.target
+WantedBy=graphical-session.target
