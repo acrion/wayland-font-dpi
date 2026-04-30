@@ -27,6 +27,7 @@ set -eu
 
 # Don't run for display manager users
 [[ $USER =~ ^(lightdm|gdm|sddm)$ ]] && exit 0
+[[ "$XDG_CURRENT_DESKTOP" == "COSMIC" ]] && exit 0
 
 CACHE_DIR="/var/cache/wayland-display-info"
 CACHE_FILE="$CACHE_DIR/display-info"
