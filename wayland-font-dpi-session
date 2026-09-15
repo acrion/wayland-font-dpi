@@ -25,13 +25,14 @@
 
 set -eu
 
-# Don't run for display manager users
-[[ $USER =~ ^(lightdm|gdm|sddm)$ ]] && exit 0
-[[ "$XDG_CURRENT_DESKTOP" == "COSMIC" ]] && exit 0
-
 CACHE_DIR="/var/cache/wayland-display-info"
 CACHE_FILE="$CACHE_DIR/display-info"
 REFERENCE_DPI=96
+DESKTOP_WAIT_SECONDS=30
+
+usable_dpi() {
+    [[ $1 =~ ^[0-9]+(\.[0-9]+)?$ ]] && (( $(bc -l <<< "$1 > 0") ))
+}
 
 apply_scale() {
     local best_line dpi width height scale
@@ -41,26 +42,73 @@ apply_scale() {
         best_line=$(awk '{px=$3*$4; if(px>max){max=px; l=$0}} END{print l}' "$CACHE_FILE")
     fi
 
-    [[ -z ${best_line:-} ]] && return 1
+    # display-info is read once, because wayland-display-info can replace it
+    # between two reads. It is empty while no output is enabled, for instance
+    # once every output has been switched off; there is nothing to scale for
+    # then, so the factor applied last stays in effect.
+    if [[ -z ${best_line:-} ]]; then
+        echo "<6>display-info lists no enabled output – keeping current scaling"
+        return 0
+    fi
 
     read -r _ dpi width height <<< "$best_line"
-    [[ $dpi =~ ^[0-9]+(\.[0-9]+)?$ ]] || return 1
+
+    # Releases of wayland-display-info up to 1.0.8 write "inf" for an output
+    # that reports a physical height of 0 mm. Nothing can be scaled for such a
+    # line, and ending the daemon would only cause systemd to restart it every
+    # three seconds.
+    if ! usable_dpi "$dpi"; then
+        echo "<4>display-info has no usable DPI value – keeping current scaling (line: $best_line)"
+        return 0
+    fi
 
     scale=$(bc -l <<< "scale=3; $dpi / $REFERENCE_DPI")
     gsettings set org.gnome.desktop.interface text-scaling-factor "$scale" 2>/dev/null || true
     echo "<5>Applied GTK text-scaling factor $scale (line: $best_line)"
 }
 
-# Wait until wayland-display-info produced the cache file
-until [[ -r $CACHE_FILE ]]; do sleep 1; done
-apply_scale
+# Prints XDG_CURRENT_DESKTOP. The service might begin before the compositor
+# has imported the variable into the systemd user environment, so it is
+# looked up there for up to DESKTOP_WAIT_SECONDS. A compositor that never
+# sets it gets an empty name once that time has passed.
+current_desktop() {
+    local _ value
+    if [[ -n ${XDG_CURRENT_DESKTOP:-} ]]; then
+        echo "$XDG_CURRENT_DESKTOP"
+        return 0
+    fi
+    for (( _ = 0; _ < DESKTOP_WAIT_SECONDS; _++ )); do
+        value=$(systemctl --user show-environment 2>/dev/null | sed -n 's/^XDG_CURRENT_DESKTOP=//p') || true
+        if [[ -n $value ]]; then
+            echo "$value"
+            return 0
+        fi
+        sleep 1
+    done
+}
 
-# Monitor file for changes
-while read -r _ _ file; do
-    [[ "$file" == "display-info" ]] || continue
-    sleep 0.1
-    echo "<6>display-info changed – reprocessing (session)..."
+main() {
+    # Don't run for display manager users
+    [[ ${USER:-} =~ ^(lightdm|gdm|sddm)$ ]] && exit 0
+    [[ $(current_desktop) == "COSMIC" ]] && exit 0
+
+    # Wait until wayland-display-info produced the cache file
+    until [[ -r $CACHE_FILE ]]; do sleep 1; done
     apply_scale
-done < <(
-    inotifywait -q -m -e close_write,create,move --format '%w %e %f' "$CACHE_DIR"
-)
+
+    # Monitor file for changes
+    while read -r _ _ file; do
+        [[ "$file" == "display-info" ]] || continue
+        sleep 0.1
+        echo "<6>display-info changed – reprocessing (session)..."
+        apply_scale
+    done < <(
+        inotifywait -q -m -e close_write,create,move --format '%w %e %f' "$CACHE_DIR"
+    )
+}
+
+# Sourcing this file, as the tests do, defines the functions without starting
+# the daemon.
+if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
+    main
+fi
