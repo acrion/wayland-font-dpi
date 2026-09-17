@@ -28,7 +28,20 @@ setup() {
     # the tests never query or change the real user manager.
     printf '#!/bin/sh\necho "$*" >> "%s"\n[ "$*" = "--user show-environment" ] && cat "%s" 2>/dev/null\nexit 0\n' \
         "$SYSTEMCTL_LOG" "$USER_ENVIRONMENT" > "$STUBS/systemctl"
-    chmod +x "$STUBS/gsettings" "$STUBS/systemctl"
+    # logind is responded to by a stub as well, because the session of whoever
+    # runs the tests must not decide the result either. It remains ignorant
+    # until LOGINCTL_DISPLAY and LOGINCTL_DESKTOP say otherwise, which is the
+    # state on a machine without logind and the state in which the environment
+    # decides.
+    cat > "$STUBS/loginctl" <<'STUB'
+#!/bin/sh
+case "$*" in
+    *show-user*)    printf '%s\n' "${LOGINCTL_DISPLAY:-}" ;;
+    *show-session*) printf '%s\n' "${LOGINCTL_DESKTOP:-}" ;;
+esac
+exit 0
+STUB
+    chmod +x "$STUBS/gsettings" "$STUBS/systemctl" "$STUBS/loginctl"
     PATH="$STUBS:$PATH"
 }
 
@@ -204,5 +217,52 @@ publish_until_reprocessed() {
     XDG_CURRENT_DESKTOP=COSMIC run session main
 
     [[ $status -eq 0 ]]
+    [[ $output == *"scales by itself"* ]]
     [[ ! -e $GSETTINGS_LOG ]]
+}
+
+# One systemd user manager serves every session of a user. A COSMIC session
+# started from a tty leaves XDG_CURRENT_DESKTOP=COSMIC within it, and the daemon
+# of the session currently visible then stopped with exit 0 -- silently, and
+# beyond the reach of Restart=on-failure. This occurred on a Ditana workstation
+# on 2026-09-16 and left the scaling of the running niri session unattended for
+# a day and a half.
+@test "the display session decides, not the shared user environment" {
+    publish $'DP-5 140.68 5120 2160\n'
+
+    LOGINCTL_DISPLAY=15 LOGINCTL_DESKTOP=niri XDG_CURRENT_DESKTOP=COSMIC start_daemon
+
+    wait_until applied 1.465
+}
+
+# logind reports the desktop as the session file spelled it, and
+# XDG_CURRENT_DESKTOP may carry several names at once, so neither of the two
+# can be compared for equality.
+@test "a lower-case COSMIC from logind is honoured" {
+    publish $'DP-5 140.68 5120 2160\n'
+
+    LOGINCTL_DISPLAY=15 LOGINCTL_DESKTOP=cosmic XDG_CURRENT_DESKTOP=niri run session main
+
+    [[ $status -eq 0 ]]
+    [[ $output == *"scales by itself"* ]]
+    [[ ! -e $GSETTINGS_LOG ]]
+}
+
+@test "COSMIC among several desktop names is honoured" {
+    publish $'DP-5 140.68 5120 2160\n'
+
+    XDG_CURRENT_DESKTOP=COSMIC:GNOME run session main
+
+    [[ $status -eq 0 ]]
+    [[ ! -e $GSETTINGS_LOG ]]
+}
+
+# A machine lacking logind, and one whose display session is not known yet, has
+# to keep working the way it did before.
+@test "without logind the user environment still decides" {
+    publish $'DP-5 140.68 5120 2160\n'
+
+    XDG_CURRENT_DESKTOP=niri start_daemon
+
+    wait_until applied 1.465
 }

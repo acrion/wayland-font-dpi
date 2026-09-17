@@ -67,17 +67,37 @@ apply_scale() {
     echo "<5>Applied GTK text-scaling factor $scale (line: $best_line)"
 }
 
-# Prints XDG_CURRENT_DESKTOP. The service might begin before the compositor
-# has imported the variable into the systemd user environment, so it is
-# looked up there for up to DESKTOP_WAIT_SECONDS. A compositor that never
-# sets it gets an empty name once that time has passed.
+# The desktop associated with the session visible on screen, queried from
+# logind. One systemd user manager is common to every session of a user, and a
+# desktop writes its own values into it without ever taking them back: a second
+# one started from a tty, or one that has ended since, leaves its
+# XDG_CURRENT_DESKTOP behind in that space. A daemon that trusts that variable
+# then works for a desktop nobody is observing. logind knows which session
+# holds the display, and that session names its own desktop.
+session_desktop() {
+    local id
+    id=$(loginctl show-user "$(id -u)" --property=Display --value 2>/dev/null) || return 1
+    [[ -n $id ]] || return 1
+    loginctl show-session "$id" --property=Desktop --value 2>/dev/null
+}
+
+# Prints the name of the desktop, favouring the value provided by logind over
+# the shared user environment. The service may start prior to logind
+# establishing a display session, and prior to the compositor importing the
+# variable, thus both sources are asked for up to DESKTOP_WAIT_SECONDS. A
+# compositor that sets neither gets an empty name after that time has passed.
 current_desktop() {
     local _ value
-    if [[ -n ${XDG_CURRENT_DESKTOP:-} ]]; then
-        echo "$XDG_CURRENT_DESKTOP"
-        return 0
-    fi
     for (( _ = 0; _ < DESKTOP_WAIT_SECONDS; _++ )); do
+        value=$(session_desktop) || true
+        if [[ -n ${value:-} ]]; then
+            echo "$value"
+            return 0
+        fi
+        if [[ -n ${XDG_CURRENT_DESKTOP:-} ]]; then
+            echo "$XDG_CURRENT_DESKTOP"
+            return 0
+        fi
         value=$(systemctl --user show-environment 2>/dev/null | sed -n 's/^XDG_CURRENT_DESKTOP=//p') || true
         if [[ -n $value ]]; then
             echo "$value"
@@ -87,10 +107,31 @@ current_desktop() {
     done
 }
 
+# XDG_CURRENT_DESKTOP is a colon-separated list, and logind reports the desktop
+# in whatever case the session file wrote it, so this is neither an equality nor
+# a comparison that may care about case.
+is_cosmic() {
+    local IFS=: name
+    for name in ${1:-}; do
+        [[ ${name^^} == COSMIC ]] && return 0
+    done
+    return 1
+}
+
 main() {
+    local desktop
+
     # Don't run for display manager users
     [[ ${USER:-} =~ ^(lightdm|gdm|sddm)$ ]] && exit 0
-    [[ $(current_desktop) == "COSMIC" ]] && exit 0
+
+    # Said rather than done silently: an exit 0 leaves no trace, and
+    # Restart=on-failure does not catch it either, so a daemon that stops here
+    # for the wrong reason looks exactly like one that was never wanted.
+    desktop=$(current_desktop)
+    if is_cosmic "$desktop"; then
+        echo "<5>$desktop scales by itself – nothing to do"
+        exit 0
+    fi
 
     # Wait until wayland-display-info produced the cache file
     until [[ -r $CACHE_FILE ]]; do sleep 1; done
